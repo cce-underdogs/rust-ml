@@ -1,14 +1,12 @@
+use candle_core::IndexOp;
 use candle_core::{DType, Device, Result, Tensor};
+use candle_nn::ops::sigmoid;
 use candle_nn::optim::AdamW;
 use candle_nn::var_builder::VarBuilder;
 use candle_nn::{loss, Linear, Module, Optimizer, VarMap};
 use csv::ReaderBuilder;
 
-const INPUT_DIM: usize = 4;
-const HIDDEN_DIM: usize = 16;
-const OUTPUT_DIM: usize = 3;
-
-fn load_iris_dataset(
+fn load_dataset(
     path: &str,
     feature_columns: &[usize],
     device: &Device,
@@ -22,20 +20,33 @@ fn load_iris_dataset(
 
     for row in reader.records() {
         let record = row.map_err(|e| candle_core::Error::Msg(format!("CSV read error: {e}")))?;
-        let num_cols = record.len();
 
-        if num_cols < 2{
-            return Err(candle_core::Error::Msg("CSV row has too few columns".to_string()));
+        if record.get(0) == Some("task_id") {
+            // Skip header row
+            continue;
         }
 
-        for &col in feature_columns{
-            let val = record.get(col)
-                .ok_or_else(|| candle_core::Error::Msg(format!("Missing column {col} in row")))?;
-                .map_err(|e|candle_core::Error::Msg(format!("Parse error in column {col}: {e}")))?;
+        let num_cols = record.len();
+
+        if num_cols < 2 {
+            return Err(candle_core::Error::Msg(
+                "CSV row has too few columns".to_string(),
+            ));
+        }
+
+        for &col in feature_columns {
+            let val = record
+                .get(col)
+                .ok_or_else(|| candle_core::Error::Msg(format!("Missing column {col} in row")))?
+                .parse::<f32>()
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("Parse error in column {col}: {e}"))
+                })?;
             features.push(val);
         }
 
-        let label = record.get(num_cols - 1)
+        let label = record
+            .get(num_cols - 1)
             .ok_or_else(|| candle_core::Error::Msg("Missing label column in row".to_string()))?
             .parse::<u32>()
             .map_err(|e| candle_core::Error::Msg(format!("Parse error in label: {e}")))?;
@@ -43,8 +54,10 @@ fn load_iris_dataset(
     }
 
     let input_dim = feature_columns.len();
+
     let xs = Tensor::from_vec(features, (labels.len(), input_dim), device)?;
     let ys = Tensor::from_vec(labels.clone(), labels.len(), device)?.to_dtype(DType::U32)?;
+
     Ok((xs, ys))
 }
 
@@ -54,9 +67,14 @@ struct MLP {
 }
 
 impl MLP {
-    fn new(vb: &VarBuilder) -> Result<Self> {
-        let l1 = candle_nn::linear(INPUT_DIM, HIDDEN_DIM, vb.pp("l1"))?;
-        let l2 = candle_nn::linear(HIDDEN_DIM, OUTPUT_DIM, vb.pp("l2"))?;
+    fn new(
+        vb: &VarBuilder,
+        input_dim: usize,
+        hidden_dim: usize,
+        output_dim: usize,
+    ) -> Result<Self> {
+        let l1 = candle_nn::linear(input_dim, hidden_dim, vb.pp("l1"))?;
+        let l2 = candle_nn::linear(hidden_dim, output_dim, vb.pp("l2"))?;
         Ok(Self { l1, l2 })
     }
 
@@ -68,40 +86,53 @@ impl MLP {
 
 fn main() -> Result<()> {
     let device = Device::Cpu;
-    let path = "/home/underdog/underdog/task_data.csv";
-    let feature_columns = [2,7,8,9,10,11]; // Columns for features
-    let (xs, ys) = load_iris_dataset(path,feature_columns, &device)?;
+    let path = "/home/eric-wcnlab/underdog/task_data.csv";
+    let feature_columns = [7, 10, 11]; // Columns for features
+    let (xs, ys) = load_dataset(path, &feature_columns, &device)?;
 
-    println!("First X (features): {:?}", first_x.to_vec1::<f32>()?);
-    println!("First Y (label): {:?}", first_y.to_scalar::<u32>()?);
+    print!(
+        "Loaded {} samples with {} features\n",
+        xs.dims()[0],
+        xs.dims()[1]
+    );
 
-    // let mut varmap = VarMap::new();
-    // let vb = VarBuilder::from_varmap(&mut varmap, DType::F32, &device);
-    // let model = MLP::new(&vb)?;
-    // let mut opt = AdamW::new_lr(varmap.all_vars(), 1e-2)?;
+    println!("First xs row: {:?}", xs.i(0)?);
 
-    // for epoch in 1..=100 {
-    //     let logits = model.forward(&xs)?;
-    //     let loss = loss::cross_entropy(&logits, &ys)?;
-    //     opt.backward_step(&loss)?;
+    let mut varmap = VarMap::new();
+    let vb = VarBuilder::from_varmap(&mut varmap, DType::F32, &device);
+    let input_dim = feature_columns.len();
+    let model = MLP::new(&vb, input_dim, 10, 1)?;
+    let mut opt = AdamW::new_lr(varmap.all_vars(), 1e-2)?;
 
-    //     if epoch % 10 == 0 {
-    //         let predicted = logits.argmax(1)?;
-    //         let correct = predicted.eq(&ys)?.sum_all()?.to_scalar::<u8>()?;
-    //         let acc = correct as f32 / ys.dims()[0] as f32;
-    //         println!(
-    //             "Epoch {epoch:3}: loss = {:.4}, acc = {:.2}%",
-    //             loss.to_scalar::<f32>()?,
-    //             acc * 100.0
-    //         );
-    //     }
-    // }
+    for epoch in 1..=100 {
+        let logits = model.forward(&xs)?.clamp(-30.0f32, 30.0f32)?.squeeze(1)?;
+        let ys_f32 = ys.to_dtype(DType::F32)?;
+        let loss = loss::binary_cross_entropy_with_logit(&logits, &ys_f32)?;
+        opt.backward_step(&loss)?;
 
-    // println!(
-    //     "Saving {} variables to iris_model.safetensors",
-    //     varmap.all_vars().len()
-    // );
-    // varmap.save("iris_model.safetensors")?;
+        if epoch % 10 == 0 {
+            let probs = sigmoid(&logits)?;
+            let predicted = probs.ge(0.5)?;
+            let correct = predicted
+                .to_dtype(DType::U32)?
+                .eq(&ys)?
+                .to_dtype(DType::F32)?
+                .sum_all()?
+                .to_scalar::<f32>()?;
+            let acc = correct / ys.dims()[0] as f32;
+            println!(
+                "Epoch {epoch:3}: loss = {:.4}, acc = {:.2}%",
+                loss.to_scalar::<f32>()?,
+                acc * 100.0
+            );
+        }
+    }
+
+    println!(
+        "Saving {} variables to model.safetensors",
+        varmap.all_vars().len()
+    );
+    varmap.save("model.safetensors")?;
 
     Ok(())
 }
