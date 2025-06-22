@@ -3,7 +3,7 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::ops::sigmoid;
 use candle_nn::optim::AdamW;
 use candle_nn::var_builder::VarBuilder;
-use candle_nn::{loss, Linear, Module, Optimizer, VarMap};
+use candle_nn::{Linear, Module, Optimizer, VarMap, loss};
 use csv::ReaderBuilder;
 
 fn load_dataset(
@@ -61,26 +61,52 @@ fn load_dataset(
     Ok((xs, ys))
 }
 
-struct MLP {
-    l1: Linear,
-    l2: Linear,
+struct ResNetBlock {
+    linear1: Linear,
+    linear2: Linear,
 }
 
-impl MLP {
+impl ResNetBlock {
+    fn new(vb: &VarBuilder, dim: usize) -> Result<Self> {
+        let linear1 = candle_nn::linear(dim, dim, vb.pp("linear1"))?;
+        let linear2 = candle_nn::linear(dim, dim, vb.pp("linear2"))?;
+        Ok(Self { linear1, linear2 })
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let h = self.linear1.forward(x)?.relu()?;
+        let h = self.linear2.forward(&h)?;
+        x.add(&h)?.relu() // 殘差 + ReLU
+    }
+}
+
+struct ResNetModel {
+    input: Linear,
+    block: ResNetBlock,
+    output: Linear,
+}
+
+impl ResNetModel {
     fn new(
         vb: &VarBuilder,
         input_dim: usize,
         hidden_dim: usize,
         output_dim: usize,
     ) -> Result<Self> {
-        let l1 = candle_nn::linear(input_dim, hidden_dim, vb.pp("l1"))?;
-        let l2 = candle_nn::linear(hidden_dim, output_dim, vb.pp("l2"))?;
-        Ok(Self { l1, l2 })
+        let input = candle_nn::linear(input_dim, hidden_dim, vb.pp("input"))?;
+        let block = ResNetBlock::new(&vb.pp("block"), hidden_dim)?;
+        let output = candle_nn::linear(hidden_dim, output_dim, vb.pp("output"))?;
+        Ok(Self {
+            input,
+            block,
+            output,
+        })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let h = self.l1.forward(x)?.relu()?;
-        self.l2.forward(&h)
+        let h = self.input.forward(x)?.relu()?;
+        let h = self.block.forward(&h)?;
+        self.output.forward(&h)
     }
 }
 
@@ -101,7 +127,7 @@ fn main() -> Result<()> {
     let mut varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&mut varmap, DType::F32, &device);
     let input_dim = feature_columns.len();
-    let model = MLP::new(&vb, input_dim, 10, 1)?;
+    let model = ResNetModel::new(&vb, input_dim, 10, 1)?;
     let mut opt = AdamW::new_lr(varmap.all_vars(), 1e-2)?;
 
     for epoch in 1..=100 {
