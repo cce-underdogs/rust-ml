@@ -4,8 +4,8 @@ use candle_nn::var_builder::VarBuilder;
 use candle_nn::{Linear, Module, VarMap};
 
 const INPUT_DIM: usize = 4;
-const HIDDEN_DIM: usize = 16;
-const OUTPUT_DIM: usize = 3;
+const HIDDEN_DIM: usize = 10;
+const OUTPUT_DIM: usize = 1;
 
 struct MLP {
     l1: Linear,
@@ -33,23 +33,23 @@ fn main() -> Result<()> {
     let model = MLP::new(&vb)?;
 
     // Load model
-    varmap.load("/home/eric-wcnlab/underdog/rust_ml/iris_model.safetensors")?;
+    varmap.load("/home/eric-wcnlab/underdog/rust_ml/model.safetensors")?;
     println!("Loaded {} variables", varmap.all_vars().len());
 
     // Input data
     let input =
-        Tensor::from_vec(vec![6.4, 3.1, 5.5, 1.8], (1, 4), &device)?.to_dtype(DType::F32)?;
+        Tensor::from_vec(vec![5.6, 3.0, 4.1, 1.3], (1, 4), &device)?.to_dtype(DType::F32)?;
 
-    // Predicted
+    // Predicted (logit)
     let output = model.forward(&input)?;
-    let predicted = output.argmax(1)?;
-    println!(
-        "Predicted class: {}",
-        predicted.squeeze(0)?.to_scalar::<u32>()?
-    );
 
-    let probs = ops::softmax(&output, 1)?;
-    println!("Class probabilities: {:?}", probs.to_vec2::<f32>()?);
+    // Apply sigmoid to get probability
+    let prob = ops::sigmoid(&output)?;
+    let prob_val = prob.to_vec2::<f32>()?[0][0];
+    let predicted_class = if prob_val >= 0.5 { 1 } else { 0 };
+
+    println!("Predicted probability: {:.4}", prob_val);
+    println!("Predicted class: {}", predicted_class);
 
     Ok(())
 }

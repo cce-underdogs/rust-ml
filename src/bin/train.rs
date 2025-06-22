@@ -3,7 +3,7 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::ops::sigmoid;
 use candle_nn::optim::AdamW;
 use candle_nn::var_builder::VarBuilder;
-use candle_nn::{loss, Linear, Module, Optimizer, VarMap};
+use candle_nn::{Linear, Module, Optimizer, VarMap, loss};
 use csv::ReaderBuilder;
 
 fn load_dataset(
@@ -86,8 +86,8 @@ impl MLP {
 
 fn main() -> Result<()> {
     let device = Device::Cpu;
-    let path = "/home/eric-wcnlab/underdog/task_data.csv";
-    let feature_columns = [7, 10, 11]; // Columns for features
+    let path = "/home/eric-wcnlab/underdog/rust_ml/data/iris.csv";
+    let feature_columns = [0, 1, 2, 3]; // Columns for features
     let (xs, ys) = load_dataset(path, &feature_columns, &device)?;
 
     print!(
