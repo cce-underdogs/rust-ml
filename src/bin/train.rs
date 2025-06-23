@@ -5,6 +5,14 @@ use candle_nn::optim::AdamW;
 use candle_nn::var_builder::VarBuilder;
 use candle_nn::{Linear, Module, Optimizer, VarMap, loss};
 use csv::ReaderBuilder;
+use serde::Serialize;
+use std::fs::File;
+
+#[derive(Serialize)]
+struct NormParams {
+    min: Vec<f32>,
+    max: Vec<f32>,
+}
 
 fn load_dataset(
     path: &str,
@@ -22,12 +30,10 @@ fn load_dataset(
         let record = row.map_err(|e| candle_core::Error::Msg(format!("CSV read error: {e}")))?;
 
         if record.get(0) == Some("task_id") {
-            // Skip header row
-            continue;
+            continue; // 跳過 header row
         }
 
         let num_cols = record.len();
-
         if num_cols < 2 {
             return Err(candle_core::Error::Msg(
                 "CSV row has too few columns".to_string(),
@@ -54,9 +60,31 @@ fn load_dataset(
     }
 
     let input_dim = feature_columns.len();
+    let sample_count = labels.len();
+    let xs_raw = Tensor::from_vec(features, (sample_count, input_dim), device)?;
+    let ys = Tensor::from_vec(labels.clone(), sample_count, device)?.to_dtype(DType::U32)?;
 
-    let xs = Tensor::from_vec(features, (labels.len(), input_dim), device)?;
-    let ys = Tensor::from_vec(labels.clone(), labels.len(), device)?.to_dtype(DType::U32)?;
+    // Compute min/max per column
+    let min = xs_raw.min(0)?;
+    let max = xs_raw.max(0)?;
+
+    // Save to JSON
+    let min_vec = min.to_vec1::<f32>()?;
+    let max_vec = max.to_vec1::<f32>()?;
+    let norm = NormParams {
+        min: min_vec,
+        max: max_vec,
+    };
+    let file = File::create("norm.json")
+        .map_err(|e| candle_core::Error::Msg(format!("Failed to create norm.json: {e}")))?;
+    serde_json::to_writer_pretty(file, &norm)
+        .map_err(|e| candle_core::Error::Msg(format!("Failed to write norm.json: {e}")))?;
+
+    // Normalize
+    let denom = max.sub(&min)?;
+    let xs = xs_raw
+        .sub(&min.broadcast_as((sample_count, input_dim))?)?
+        .div(&denom.broadcast_as((sample_count, input_dim))?)?;
 
     Ok((xs, ys))
 }
@@ -113,7 +141,7 @@ impl ResNetModel {
 fn main() -> Result<()> {
     let device = Device::Cpu;
     let path = "/home/eric-wcnlab/underdog/task_data.csv";
-    let feature_columns = [7, 10, 11]; // Columns for features
+    let feature_columns = [1, 2, 3, 4, 5, 6]; // Columns for features
     let (xs, ys) = load_dataset(path, &feature_columns, &device)?;
 
     print!(
@@ -128,9 +156,9 @@ fn main() -> Result<()> {
     let vb = VarBuilder::from_varmap(&mut varmap, DType::F32, &device);
     let input_dim = feature_columns.len();
     let model = ResNetModel::new(&vb, input_dim, 10, 1)?;
-    let mut opt = AdamW::new_lr(varmap.all_vars(), 1e-2)?;
+    let mut opt = AdamW::new_lr(varmap.all_vars(), 1e-4)?;
 
-    for epoch in 1..=100 {
+    for epoch in 1..=1500 {
         let logits = model.forward(&xs)?.clamp(-30.0f32, 30.0f32)?.squeeze(1)?;
         let ys_f32 = ys.to_dtype(DType::F32)?;
         let loss = loss::binary_cross_entropy_with_logit(&logits, &ys_f32)?;
